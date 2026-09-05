@@ -40,6 +40,17 @@ const HELIX_CARD_H=1.34;
 const HELIX_CARD_W=2.8;
 const GRID_CARD_H=1.77;
 const GRID_CARD_W=2.54;
+const CARD_ASSETS=[
+  './assets/work-01.svg',
+  './assets/work-02.svg',
+  './assets/work-03.svg',
+  './assets/work-04.svg',
+  './assets/work-05.svg',
+  './assets/work-06.svg',
+  './assets/work-07.svg',
+  './assets/work-08.svg',
+  './assets/work-09.svg'
+];
 
 const R=4.45;
 const Y_START=-1.09;
@@ -78,6 +89,7 @@ const GRID_TARGETS=[
   new THREE.Vector3( 0.00,-0.98, .06),
   new THREE.Vector3( 2.72,-0.98, .10)
 ];
+const DESKTOP_GRID_TARGETS=GRID_TARGETS.map(target=>target.clone());
 const GRID_ENTRANCES=[
   new THREE.Vector3(-8.2, 5.6,.55),
   new THREE.Vector3( 0.0, 5.95,.40),
@@ -97,6 +109,10 @@ const GRID_START_ROT=[
 const STACK_STAGGER=.07;
 const GRID_MOVE_DURATION=.34;
 const STACK_ENTRY_FRACTION=.8;
+const GRID_DESKTOP_BREAKPOINT=1200;
+const GRID_MOBILE_BREAKPOINT=600;
+
+let gridLayoutScale=1;
 
 const clamp=(v,a=0,b=1)=>Math.max(a,Math.min(b,v));
 const lerp=(a,b,t)=>a+(b-a)*t;
@@ -134,9 +150,33 @@ function upVector(a,tan,out=new THREE.Vector3()){
   return out;
 }
 
+function getTextureDimensions(tex){
+  const image=tex.image;
+  return {
+    width:image?.naturalWidth || image?.videoWidth || image?.width || 1,
+    height:image?.naturalHeight || image?.videoHeight || image?.height || 1
+  };
+}
+
+function updateCoverCrop(material,tex,targetAspect){
+  const {width,height}=getTextureDimensions(tex);
+  const imageAspect=width/height;
+  const coverScale=material.uniforms.coverScale.value;
+
+  if(imageAspect>targetAspect){
+    coverScale.set(targetAspect/imageAspect,1);
+  }else{
+    coverScale.set(1,imageAspect/targetAspect);
+  }
+}
+
 function buildCardMaterial(tex){
   return new THREE.ShaderMaterial({
-    uniforms:{ map:{value:tex}, opacity:{value:1.0} },
+    uniforms:{
+      map:{value:tex},
+      opacity:{value:1.0},
+      coverScale:{value:new THREE.Vector2(1,1)}
+    },
     transparent:true,
     side:THREE.DoubleSide,
     vertexShader:`
@@ -149,9 +189,10 @@ function buildCardMaterial(tex){
     fragmentShader:`
       uniform sampler2D map;
       uniform float opacity;
+      uniform vec2 coverScale;
       varying vec2 vUv;
       void main(){
-        vec2 uv=vUv;
+        vec2 uv=(vUv-0.5)*coverScale+0.5;
         if(!gl_FrontFacing){
           uv.x=1.0-uv.x;
         }
@@ -160,6 +201,14 @@ function buildCardMaterial(tex){
       }
     `
   });
+}
+
+function loadCardTexture(url,targetAspect,onMaterialReady){
+  const tex=loader.load(url,loadedTexture=>{
+    updateCoverCrop(onMaterialReady(),loadedTexture,targetAspect);
+  });
+  tex.colorSpace=THREE.SRGBColorSpace;
+  return tex;
 }
 
 const outlineUpperMaterial=new THREE.LineBasicMaterial({
@@ -188,12 +237,17 @@ outlineGroup.add(outlineUpper,outlineLower);
 
 for(let i=0;i<COUNT;i++){
   const cardNumber=COUNT-i;
-  const tex=loader.load(`./assets/work-${String(cardNumber).padStart(2,'0')}.svg`);
-  tex.colorSpace=THREE.SRGBColorSpace;
+  let material;
+  const tex=loadCardTexture(
+    CARD_ASSETS[cardNumber-1],
+    HELIX_CARD_W/HELIX_CARD_H,
+    ()=>material
+  );
+  material=buildCardMaterial(tex);
 
   const mesh=new THREE.Mesh(
     new THREE.PlaneGeometry(HELIX_CARD_W,HELIX_CARD_H,W_SEGS,1),
-    buildCardMaterial(tex)
+    material
   );
   mesh.frustumCulled=false;
   mesh.renderOrder=2;
@@ -203,17 +257,51 @@ for(let i=0;i<COUNT;i++){
 
 for(let i=0;i<GRID_ORDER.length;i++){
   const asset=GRID_ORDER[i];
-  const tex=loader.load(`./assets/work-${String(asset).padStart(2,'0')}.svg`);
-  tex.colorSpace=THREE.SRGBColorSpace;
+  let material;
+  const tex=loadCardTexture(
+    CARD_ASSETS[asset-1],
+    GRID_CARD_W/GRID_CARD_H,
+    ()=>material
+  );
+  material=buildCardMaterial(tex);
 
   const geo=new THREE.PlaneGeometry(GRID_CARD_W,GRID_CARD_H,W_SEGS,GRID_H_SEGS);
-  const mesh=new THREE.Mesh(geo,buildCardMaterial(tex));
+  const mesh=new THREE.Mesh(geo,material);
   mesh.frustumCulled=false;
   mesh.renderOrder=6;
   mesh.userData.base=Float32Array.from(geo.attributes.position.array);
   mesh.userData.slot=i;
   gridCards.push(mesh);
   scene.add(mesh);
+}
+
+function updateGridLayout(){
+  if(innerWidth>=GRID_DESKTOP_BREAKPOINT){
+    gridLayoutScale=1;
+    GRID_TARGETS.forEach((target,index)=>target.copy(DESKTOP_GRID_TARGETS[index]));
+    return;
+  }
+
+  const columns=innerWidth<=GRID_MOBILE_BREAKPOINT?1:2;
+  const rows=Math.ceil(GRID_TARGETS.length/columns);
+  const gapX=columns===1?0:.18;
+  const gapY=columns===1?.12:.18;
+  const baseWidth=columns*GRID_CARD_W+(columns-1)*gapX;
+  const baseHeight=rows*GRID_CARD_H+(rows-1)*gapY;
+  const worldHeight=2*Math.tan(THREE.MathUtils.degToRad(camera.fov*.5))*camera.position.z;
+  const worldWidth=worldHeight*camera.aspect;
+  const maxWidth=worldWidth*.9;
+  const maxHeight=worldHeight*.88;
+
+  gridLayoutScale=Math.min(1,maxWidth/baseWidth,maxHeight/baseHeight);
+
+  GRID_TARGETS.forEach((target,index)=>{
+    const column=index%columns;
+    const row=Math.floor(index/columns);
+    const x=(column-(columns-1)*.5)*(GRID_CARD_W+gapX)*gridLayoutScale;
+    const y=((rows-1)*.5-row)*(GRID_CARD_H+gapY)*gridLayoutScale;
+    target.set(x,y,DESKTOP_GRID_TARGETS[index].z);
+  });
 }
 
 let target=0,current=0;
@@ -326,7 +414,7 @@ function updateGridCard(mesh,moveT,settleT,time){
   mesh.rotation.y=lerp(r0.y,0,moveT) + Math.cos(time*2.95+slot*.7)*0.05*windBase;
   mesh.rotation.z=lerp(r0.z,0,moveT) + Math.sin(time*3.8+slot*.9)*0.035*windBase;
 
-  const sc=lerp(.95,1,moveT);
+  const sc=lerp(.95,1,moveT)*gridLayoutScale;
   mesh.scale.set(sc,sc,sc);
   mesh.material.uniforms.opacity.value=clamp(moveT*1.7);
 }
@@ -336,6 +424,7 @@ function resize(){
   camera.aspect=innerWidth/innerHeight;
   camera.updateProjectionMatrix();
   camera.position.z=innerWidth<800?11.8:9.25;
+  updateGridLayout();
 }
 
 function animate(tms=0){
